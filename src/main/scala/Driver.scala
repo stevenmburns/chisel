@@ -455,6 +455,7 @@ object Driver extends FileSystemUtilities{
       case "dot" => new DotBackend
       case "fpga" => new FPGABackend
       case "sysc" => new SysCBackend
+      case "syscrtl" => new SysCRtlBackend
       case _ => Class.forName(backendName).newInstance.asInstanceOf[Backend]
     }
   }
