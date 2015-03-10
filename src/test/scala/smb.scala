@@ -48,10 +48,17 @@ class smb extends Module {
 
    val s = Module( new smb_decr())
 
-   val r = Reg( UInt( width=16), init=UInt(0))
+   val r  = Reg( UInt( width=16), init=UInt(0))
+   val r2 = Reg( UInt( width=16))
 
-   r := r + io.a
-   s.io.a := r
+   val z = io.a === UInt(0)
+
+   unless (z) {
+      r := r + io.a
+      r2 := r
+   }
+
+   s.io.a := r2
    io.b := s.io.b
 
 }

@@ -67,6 +67,9 @@ object SysCRtlBackend {
 }
 
 class SysCRtlBackend extends Backend {
+  val methods = ArrayBuffer[(String,ArrayBuffer[Node])]()
+  val threads = ArrayBuffer[String]()
+
   val keywords = SysCRtlBackend.keywords
   override val needsLowering = Set("PriEnc", "OHToUInt", "Log2")
 
@@ -111,6 +114,10 @@ class SysCRtlBackend extends Backend {
   def emitWidth(node: Node): String = {
     val w = node.needWidth()
     if (w == 1) "" else "[" + (w-1) + ":0]"
+  }
+  def emitSCIntType(node: Node): String = {
+    val w = node.needWidth()
+    if (w == 1) "bool" else "sc_int<" + w + ">"
   }
 
   override def emitTmp(node: Node): String =
@@ -375,9 +382,10 @@ class SysCRtlBackend extends Backend {
   }
 
   def emitDecBase(node: Node, wire: String = "wire"): String =
-    s"  ${wire}${emitWidth(node)} ${emitRef(node)};\n"
+    s"  sc_signal<${emitSCIntType(node)} > ${emitRef(node)};\n"
 
-  def emitDecReg(node: Node): String = emitDecBase(node, "reg ")
+  def emitDecWire(node: Node): String = emitDecBase(node, "wire")
+  def emitDecReg(node: Node): String = emitDecBase(node, "reg")
 
   override def emitDec(node: Node): String = {
     val gotWidth = node.needWidth()
@@ -385,7 +393,7 @@ class SysCRtlBackend extends Backend {
     node match {
       case x: Bits =>
         if(!x.isIo) {
-          emitDecBase(node)
+          emitDecWire(node)
         } else {
           ""
         }
@@ -411,14 +419,14 @@ class SysCRtlBackend extends Backend {
 
       case x: MemAccess =>
         x.referenced = true
-        emitDecBase(node)
+        emitDecWire(node)
 
       case _: ROMData => ""
 
       case _: Literal => ""
 
       case _ =>
-        emitDecBase(node)
+        emitDecWire(node)
     }
     (if (node.prune && res != "") "//" else "") + res
   }
@@ -830,8 +838,8 @@ class SysCRtlBackend extends Backend {
   def emitReg(node: Node): String = {
     node match {
       case reg: Reg =>
-        def cond(c: Node) = "if(" + emitRef(c) + ") begin"
-        def uncond = "begin"
+        def cond(c: Node) = "if(" + emitRef(c) + ") begin /* COND */"
+        def uncond = "begin /* UNCOND */"
         def sep = "\n      "
         def assign(r: Reg, x: Node) = emitRef(r) + " <= " + emitRef(x) + ";\n"
         def traverseMuxes(r: Reg, x: Node): List[String] = x match {
@@ -882,29 +890,30 @@ class SysCRtlBackend extends Backend {
     var nl = "";
     res.append("//SMB before clocks and resets\n")
     if (c.clocks.length > 0 || c.resets.size > 0)
-      res.append((c.clocks ++ c.resets.values.toList).map(x => "input " + emitRef(x)).reduceLeft(_ + ", " + _))
+    res.append(c.clocks.map(x => emitRef(x)).foldLeft("")(_ + "  sc_in_clk " + _ + ";\n"))
+    res.append(c.resets.values.toList.map(x => emitRef(x)).foldLeft("")(_ + "  sc_in<bool> " + _ + ";\n"))
+
     val ports = new ArrayBuffer[StringBuilder]
     for ((n, w) <- c.wires) {
-      // if(first && !hasReg) {first = false; nl = "\n"} else nl = ",\n";
       w match {
         case io: Bits => {
           val prune = if (io.prune && c != Driver.topComponent) "//" else ""
           if (io.dir == INPUT) {
-            ports += new StringBuilder(nl + "    " + prune + "input " +
-                                       emitWidth(io) + " " + emitRef(io));
+            ports += new StringBuilder(nl + "  " + prune + "sc_in<" +
+                                       emitSCIntType(io) + " > " + emitRef(io) + ";");
           } else if(io.dir == OUTPUT) {
-            ports += new StringBuilder(nl + "    " + prune + "output" +
-                                       emitWidth(io) + " " + emitRef(io));
+            ports += new StringBuilder(nl + "  " + prune + "sc_out<" +
+                                       emitSCIntType(io) + " > " + emitRef(io) + ";");
           }
         }
       };
     }
-    val uncommentedPorts = ports.filter(!_.result.contains("//"))
-    uncommentedPorts.slice(0, uncommentedPorts.length-1).map(_.append(","))
-    if (c.clocks.length > 0 || c.resets.size > 0) res.append(",\n") else res.append("\n")
+//    val uncommentedPorts = ports.filter(!_.result.contains("//"))
+//    uncommentedPorts.slice(0, uncommentedPorts.length-1).map(_.append(","))
+
     res.append("//SMB before ports\n")
     res.append(ports.map(_.result).reduceLeft(_ + "\n" + _))
-    res.append("\n);\n\n");
+    res.append("\n\n");
     res.append("//SMB before emitDecs\n")
     res.append(emitDecs(c));
     res.append("\n");
@@ -915,9 +924,29 @@ class SysCRtlBackend extends Backend {
     res.append(emitDefs(c));
     res.append("//SMB before emitRegs\n")
     res.append(emitRegs(c))
-    res.append("endmodule\n\n");
+
+    res.append("//SMB before emitConstructor\n")
+    res.append(emitConstructor(c));
+
+    res.append("}\n\n");
     res.result();
   }
+
+  def emitConstructor(c: Module): String = {
+    val res = new StringBuilder()
+    res.append("  SC_CTOR(" + c.moduleName + ") {\n")
+    for (m<-methods) {
+       res.append("    SC_METHOD(" + m._1 + ");\n")        
+       res.append("    sensitive << x;\n")        
+    }
+    for (t<-threads) {
+       res.append("    SC_THREAD(" + t + ");\n")        
+       res.append("    sensitive << clk.pos();\n")        
+    }
+    res.append("  }\n\n")
+    res.result()
+  }
+
 
   def flushModules( out: java.io.FileWriter,
     defs: LinkedHashMap[String, LinkedHashMap[String, ArrayBuffer[Module] ]],
@@ -954,6 +983,7 @@ class SysCRtlBackend extends Backend {
     if (top.isInstanceOf[BlackBox])
       return
 
+    print( "CHILDREN:"); println( top.children)
     for (child <- top.children) {
       emitChildren(child, defs, out, depth + 1);
     }
@@ -961,7 +991,10 @@ class SysCRtlBackend extends Backend {
     for( (text, comps) <- defs(className)) {
       if( comps contains top ) {
         if( !(flushedTexts contains text) ) {
-          out.append("SC_MODULE " + top.moduleName + "(")
+          out.append("SC_MODULE(" + top.moduleName + ") {")
+          print( "TEXT: ")
+          println( comps)
+          println( text)
           out.append(text);
           flushedTexts += text
         }
