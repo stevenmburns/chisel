@@ -179,20 +179,23 @@ class SysCRtlBackend extends Backend {
   }
 
   def emitDef(c: Module): String = {
-    val spacing = (if(c.verilog_parameters != "") " " else "");
-    var res = "  " + c.moduleName + " " + c.verilog_parameters + spacing + c.name + "(";
+
+    var res = "//  " + c.moduleName + " " + c.name + "(\"" + c.name + "\");\n"
+
+//    val spacing = (if(c.verilog_parameters != "") " " else "");
+//    var res = "  " + c.moduleName + " " + c.verilog_parameters + spacing + c.name + "(";
     if (c.clocks.length > 0) {
-      res = res + (c.clocks).map(x => "." + emitRef(x) + "(" + emitRef(x) + ")").reduceLeft(_ + ", " + _)
+      res = res + (c.clocks).map(x => c.name + "." + emitRef(x) + "(" + emitRef(x) + ");\n").reduceLeft(_ + _)
     }
     if (c.resets.size > 0 ) {
       if (c.clocks.length > 0) res = res + ", "
-      res = res + (c.resets.values.toList).map(x => "." + emitRef(x) + "(" + emitRef(x.inputs(0)) + ")").reduceLeft(_ + ", " + _)
+      res = res + (c.resets.values.toList).map(x => c.name + "." + emitRef(x) + "(" + emitRef(x.inputs(0)) + ");\n").reduceLeft(_ + _)
     }
     var isFirst = true;
     val portDecs = new ArrayBuffer[StringBuilder]
     for ((n, w) <- c.wires) {
       if(n != "reset" && n != Driver.implicitReset.name) {
-        var portDec = "." + n + "( ";
+        var portDec = c.name + "." + n + "( ";
         w match {
           case io: Bits  =>
             if (io.dir == INPUT) { // if reached, then input has consumers
@@ -228,25 +231,25 @@ class SysCRtlBackend extends Backend {
               }
             }
         }
-        portDec += " )"
+        portDec += " );\n"
         portDecs += new StringBuilder(portDec)
       }
     }
-    val uncommentedPorts = portDecs.filter(!_.result.contains("//"))
-    uncommentedPorts.slice(0, uncommentedPorts.length-1).map(_.append(","))
+//    val uncommentedPorts = portDecs.filter(!_.result.contains("//"))
+//    uncommentedPorts.slice(0, uncommentedPorts.length-1).map(_.append(","))
     portDecs.map(_.insert(0, "       "))
-    if (c.clocks.length > 0 || c.resets.size > 0) res += ",\n" else res += "\n"
-    res += portDecs.map(_.result).reduceLeft(_ + "\n" + _)
-    res += "\n  );\n";
-    if (c.wires.map(_._2.driveRand).reduceLeft(_ || _)) {
-      res += if_not_synthesis
-      for ((n, w) <- c.wires) {
-        if (w.driveRand) {
-          res += "    assign " + c.name + "." + n + " = " + emitRand(w) + ";\n"
-        }
-      }
-      res += endif_not_synthesis
-    }
+//    if (c.clocks.length > 0 || c.resets.size > 0) res += ",\n" else res += "\n"
+    res += portDecs.map(_.result).reduceLeft(_ + _)
+//    res += "\n  );\n";
+//    if (c.wires.map(_._2.driveRand).reduceLeft(_ || _)) {
+//      res += if_not_synthesis
+//      for ((n, w) <- c.wires) {
+//        if (w.driveRand) {
+//          res += "    assign " + c.name + "." + n + " = " + emitRand(w) + ";\n"
+//        }
+//      }
+//      res += endif_not_synthesis
+//    }
     res
   }
 
@@ -804,10 +807,15 @@ class SysCRtlBackend extends Backend {
     for (clock <- c.clocks) {
       val dom = clkDomains(clock)
       if (!dom.isEmpty) {
-        if (res.isEmpty)
-          res.append("\n")
-        res.append("  always @(posedge " + emitRef(clock) + ") begin\n")
+//        if (res.isEmpty)
+//          res.append("\n")
+        res.append("  void t0() {\n")
+	res.append("     wait(1);\n")
+        res.append("     while(1) {\n")
+//	always @(posedge " + emitRef(clock) + ") begin\n")
         res.append(dom.result())
+        res.append("        wait(1);\n")
+        res.append("     };\n")
         res.append("  end\n")
       }
     }
@@ -836,16 +844,16 @@ class SysCRtlBackend extends Backend {
   def emitReg(node: Node): String = {
     node match {
       case reg: Reg =>
-        def cond(c: Node) = "if(" + emitRef(c) + ") begin /* COND */"
-        def uncond = "begin /* UNCOND */"
-        def sep = "\n      "
-        def assign(r: Reg, x: Node) = emitRef(r) + " <= " + emitRef(x) + ";\n"
+        def cond(c: Node) = "if ( " + emitRef(c) + ") { /* COND */\n"
+        def uncond = "{ /* UNCOND */\n"
+        def sep = "           "
+        def assign(r: Reg, x: Node) = emitRef(r) + " = " + emitRef(x) + ";\n"
         def traverseMuxes(r: Reg, x: Node): List[String] = x match {
           case m: Mux => (cond(m.inputs(0)) + sep + assign(r, m.inputs(1))) :: traverseMuxes(r, m.inputs(2))
           case _ => if (x eq r) Nil else List(uncond + sep + assign(r, x))
         }
-        if (!reg.next.isInstanceOf[Mux]) "    " + assign(reg, reg.next)
-        else "    " + traverseMuxes(reg, reg.next).reduceLeft(_ + "    end else " + _) + "    end\n"
+        if (!reg.next.isInstanceOf[Mux]) "             " + assign(reg, reg.next)
+        else "        " + traverseMuxes(reg, reg.next).reduceLeft(_ + "        } else " + _) + "        }\n"
 
       case m: MemWrite =>
         if (m.mem.isInline) {
