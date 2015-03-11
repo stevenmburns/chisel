@@ -117,7 +117,7 @@ class SysCRtlBackend extends Backend {
   }
   def emitSCIntType(node: Node): String = {
     val w = node.needWidth()
-    if (w == 1) "bool" else "sc_int<" + w + ">"
+    if (w == 1) "bool" else "sc_uint<" + w + ">"
   }
 
   override def emitTmp(node: Node): String =
@@ -135,10 +135,11 @@ class SysCRtlBackend extends Backend {
 
   private def emitLit(x: BigInt): String =
     emitLit(x, x.bitLength + (if (x < 0) 1 else 0))
+
   private def emitLit(x: BigInt, w: Int): String = {
     val unsigned = if (x < 0) (BigInt(1) << w) + x else x
     require(unsigned >= 0)
-    w + "'h" + unsigned.toString(16)
+    "sc_uint_base( 0x" + unsigned.toString(16) + ", " + w + ")"
   }
 
   // $random only emits 32 bits; repeat its result to fill the Node
@@ -196,28 +197,17 @@ class SysCRtlBackend extends Backend {
           case io: Bits  =>
             if (io.dir == INPUT) { // if reached, then input has consumers
               if (io.inputs.length == 0) {
-                  // if (Driver.saveConnectionWarnings) {
-                  //   ChiselError.warning("" + io + " UNCONNECTED IN " + io.component);
-                  // } removed this warning because pruneUnconnectedIOs should have picked it up
                 portDec = "//" + portDec
               } else if (io.inputs.length > 1) {
                   if (Driver.saveConnectionWarnings) {
                     ChiselError.warning("" + io + " CONNECTED TOO MUCH " + io.inputs.length);
                   }
                 portDec = "//" + portDec
-              /* } else if (!c.isWalked.contains(w)){
-                  if (Driver.saveConnectionWarnings) {
-                    ChiselError.warning(" UNUSED INPUT " + io + " OF " + c + " IS REMOVED");
-                  }
-                portDec = "//" + portDec // I don't think this is necessary */
               } else {
                 portDec += emitRef(io.inputs(0));
               }
             } else if(io.dir == OUTPUT) {
               if (io.consumers.size == 0) {
-                  // if (Driver.saveConnectionWarnings) {
-                  //   ChiselError.warning("" + io + " UNCONNECTED IN " + io.component + " BINDING " + c.findBinding(io));
-                  // } removed this warning because pruneUnconnectedsIOs should have picked it up
                 portDec = "//" + portDec
               } else {
                 c.parent.findBinding(io) match {
@@ -263,40 +253,48 @@ class SysCRtlBackend extends Backend {
   override def emitDef(node: Node): String = {
     val res =
     node match {
-      case x: Bits =>
-        if (x.isIo && x.dir == INPUT) {
+      case x: Bits if (x.isIo && x.dir == INPUT) =>
           ""
-        } else {
-          if (node.inputs.length == 0) {
+      case x: Bits if (node.inputs.length == 0) => 
+         {
             ChiselError.warning("UNCONNECTED " + node + " IN " + node.component)
             "  assign " + emitTmp(node) + " = " + emitRand(node) + ";\n"
-          } else if (node.inputs(0) == null) {
+         }
+      case x: Bits if (node.inputs(0) == null) =>
+         {
             ChiselError.warning("UNCONNECTED WIRE " + node + " IN " + node.component)
             "  assign " + emitTmp(node) + " = " + emitRand(node) + ";\n"
-          } else {
-            "  assign " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + ";\n"
-          }
-        }
+         }
+      case x: Bits =>
+            "  void m0() { " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + "; }\n"
 
       case x: Mux =>
-        "  assign " + emitTmp(x) + " = " + emitRef(x.inputs(0)) + " ? " + emitRef(x.inputs(1)) + " : " + emitRef(x.inputs(2)) + ";\n"
+        "  void m0() { " + emitTmp(x) + " = (" + emitRef(x.inputs(0)) + ") ? " + emitRef(x.inputs(1)) + " : " + emitRef(x.inputs(2)) + "; }\n"
+
+      case o: Op if ( o.op == "##") =>
+        "  assign " + emitTmp(o) + " = " +
+          "{" + emitRef(node.inputs(0)) + ", " + emitRef(node.inputs(1)) + "}"        + ";\n"
+
+      case o: Op if ( node.inputs.length == 1) =>
+          "  void m0() { " + emitTmp(o) + " = " +
+          o.op + " " + emitRef(node.inputs(0)) + "; }\n"
+
+      case o: Op if (o.op == "s*s" || o.op == "s*u" || o.op == "s%s" || o.op == "s/s") =>
+        "  assign " + emitTmp(o) + " = " +
+          "$signed(" + emitRef(node.inputs(0)) + ") " + o.op(1) + " $signed(" + emitRef(node.inputs(1)) + ")"        + ";\n"
+
+      case o: Op if (o.op == "s<" || o.op == "s<=") =>
+        "  assign " + emitTmp(o) + " = " +
+          "$signed(" + emitRef(node.inputs(0)) + ") " + o.op.tail + " $signed(" + emitRef(node.inputs(1)) + ")"        + ";\n"
+
+      case o: Op if (o.op == "s>>") =>
+        "  assign " + emitTmp(o) + " = " +
+          "$signed(" + emitRef(node.inputs(0)) + ") >>> " + emitRef(node.inputs(1))        + ";\n"
 
       case o: Op =>
-        val c = o.component;
-        "  assign " + emitTmp(o) + " = " +
-        (if (o.op == "##") {
-          "{" + emitRef(node.inputs(0)) + ", " + emitRef(node.inputs(1)) + "}"
-        } else if (node.inputs.length == 1) {
-          o.op + " " + emitRef(node.inputs(0))
-        } else if (o.op == "s*s" || o.op == "s*u" || o.op == "s%s" || o.op == "s/s") {
-          "$signed(" + emitRef(node.inputs(0)) + ") " + o.op(1) + " $signed(" + emitRef(node.inputs(1)) + ")"
-        } else if (o.op == "s<" || o.op == "s<=") {
-          "$signed(" + emitRef(node.inputs(0)) + ") " + o.op.tail + " $signed(" + emitRef(node.inputs(1)) + ")"
-        } else if (o.op == "s>>") {
-          "$signed(" + emitRef(node.inputs(0)) + ") >>> " + emitRef(node.inputs(1))
-        } else {
-          emitRef(node.inputs(0)) + " " + o.op + " " + emitRef(node.inputs(1))
-        }) + ";\n"
+        "  void m0() { " + emitTmp(o) + " = " +
+          emitRef(node.inputs(0)) + " " + o.op + " " + emitRef(node.inputs(1))        + "; }\n"
+
 
       case x: Extract =>
         node.inputs.tail.foreach(x.validateIndex)
