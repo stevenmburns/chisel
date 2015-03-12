@@ -33,8 +33,8 @@ import collection.mutable.ArrayBuffer
 
 class smb_decr extends Module {
    val io = new Bundle {
-     val a = UInt( INPUT, width=16)
-     val b = UInt( OUTPUT, width=16)
+     val a = SInt( INPUT, width=16)
+     val b = SInt( OUTPUT, width=16)
    }
 
    io.b := io.a - UInt(10)

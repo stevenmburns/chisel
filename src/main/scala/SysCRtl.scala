@@ -132,6 +132,13 @@ class SysCRtlBackend extends Backend {
     }
   }
 
+  def emitRefWithRead( n : Node) : String = {
+      n match {
+         case _ : Literal => emitRef( n)
+         case _ => emitRef( n) + ".read()"
+      }
+  }
+
   private def emitLit(x: BigInt): String =
     emitLit(x, x.bitLength + (if (x < 0) 1 else 0))
 
@@ -139,6 +146,16 @@ class SysCRtlBackend extends Backend {
     val unsigned = if (x < 0) (BigInt(1) << w) + x else x
     require(unsigned >= 0)
     "sc_uint_base( 0x" + unsigned.toString(16) + ", " + w + ")"
+  }
+
+  private def emitIntLit(node: Node): String = {
+    node match {
+       case l : Literal =>
+          "" + l.value
+       case _ =>       
+          ChiselError.warning("Expected an integer literal. Got: " + node);
+          "0x0"
+    }
   }
 
   // $random only emits 32 bits; repeat its result to fill the Node
@@ -273,18 +290,22 @@ class SysCRtlBackend extends Backend {
          }
       case x: Mux =>
          {
-            val p : (Int, Array[Node]) = ( instance_number, Array(node.inputs(0),node.inputs(1),node.inputs(2)))
+            val p = ( instance_number, Array(node.inputs(0),node.inputs(1),node.inputs(2)))
             methods_and_threads(module_name)._1 += p
-            "  void m" + instance_number + "() { " + emitTmp(x) + " = (" + emitRef(x.inputs(0)) + ") ? " + emitRef(x.inputs(1)) + " : " + emitRef(x.inputs(2)) + "; }\n"
+            "  void m" + instance_number + "() { " + emitTmp(node) + " = (" + emitRef(node.inputs(0)) + ") ? " + emitRef(node.inputs(1)) + " : " + emitRef(node.inputs(2)) + "; }\n"
          }
 
       case o: Op if ( o.op == "##") =>
-        "  assign " + emitTmp(o) + " = " +
-          "{" + emitRef(node.inputs(0)) + ", " + emitRef(node.inputs(1)) + "}"        + ";\n"
+         {
+            val p = ( instance_number, Array(node.inputs(0),node.inputs(1)))
+            methods_and_threads(module_name)._1 += p
+
+            "  void m" + instance_number + "() { " + emitTmp(node) + " = concat(" + emitRef(node.inputs(0)) + ", " + emitRef(node.inputs(1)) + "); }\n"
+         }
 
       case o: Op if ( node.inputs.length == 1) =>
          {
-            val p : (Int, Array[Node]) = ( instance_number, Array(node.inputs(0)))
+            val p = ( instance_number, Array(node.inputs(0)))
             methods_and_threads(module_name)._1 += p
 
             "  void m" + instance_number + "() { " + emitTmp(o) + " = " + o.op + " " + emitRef(node.inputs(0)) + "; }\n"
@@ -307,23 +328,29 @@ class SysCRtlBackend extends Backend {
             val p : (Int, Array[Node]) = ( instance_number, Array(node.inputs(0),node.inputs(1)))
             methods_and_threads(module_name)._1 += p
 
-            "  void m" + instance_number + "() { " + emitTmp(o) + " = " + emitRef(node.inputs(0)) + " " + o.op + " " + emitRef(node.inputs(1))        + "; }\n"
+            "  void m" + instance_number + "() { " + emitTmp(o) + " = " + emitRefWithRead(node.inputs(0)) + " " + o.op + " " + emitRefWithRead(node.inputs(1))        + "; }\n"
          }
 
       case x: Extract =>
         node.inputs.tail.foreach(x.validateIndex)
         val gotWidth = node.inputs(0).needWidth()
         if (node.inputs.length < 3) {
+          val p : (Int, Array[Node]) = ( instance_number, Array(node.inputs(0)))
+          methods_and_threads(module_name)._1 += p
+
           if(gotWidth > 1) {
-            "  assign " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + "[" + emitRef(node.inputs(1)) + "];\n"
+            "  void m" + instance_number + "() { " + emitTmp(node) + " = " + emitRefWithRead(node.inputs(0)) + ".range(" + emitIntLit(node.inputs(1)) + ");}\n"
           } else {
-            "  assign " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + ";\n"
+            "  void m" + instance_number + "() { " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + ";}\n"
           }
         } else {
+          val p : (Int, Array[Node]) = ( instance_number, Array(node.inputs(0)))
+          methods_and_threads(module_name)._1 += p
+
           if(gotWidth > 1) {
-            "  assign " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + "[" + emitRef(node.inputs(1)) + ":" + emitRef(node.inputs(2)) + "];\n"
+            "  void m" + instance_number + "() { " + emitTmp(node) + " = " + emitRefWithRead(node.inputs(0)) + ".range(" + emitIntLit(node.inputs(1)) + "," + emitIntLit(node.inputs(2)) + ");}\n"
           } else {
-            "  assign " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + ";\n"
+            "  void m" + instance_number + "() { " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + ";}\n"
           }
         }
 
@@ -821,14 +848,11 @@ class SysCRtlBackend extends Backend {
     for ((clock,instance_number) <- c.clocks.zipWithIndex) {
       val dom = clkDomains(clock)
       if (!dom.isEmpty) {
-//        if (res.isEmpty)
-//          res.append("\n")
         methods_and_threads(moduleName)._2 += instance_number
         res.append("  void t" + instance_number + "() {\n")
 	res.append("     wait(1);\n")
         res.append("     while(1) {\n")
-//	always @(posedge " + emitRef(clock) + ") begin\n")
-        res.append(dom.result())
+        res.append( dom.result())
         res.append("        wait(1);\n")
         res.append("     }\n")
         res.append("  }\n")
