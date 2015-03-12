@@ -67,8 +67,7 @@ object SysCRtlBackend {
 }
 
 class SysCRtlBackend extends Backend {
-  val methods = ArrayBuffer[(String,ArrayBuffer[Node])]()
-  val threads = ArrayBuffer[String]()
+  val methods_and_threads = HashMap[String,(ArrayBuffer[(Int,Array[Node])],ArrayBuffer[Int])]()
 
   val keywords = SysCRtlBackend.keywords
   override val needsLowering = Set("PriEnc", "OHToUInt", "Log2")
@@ -179,9 +178,7 @@ class SysCRtlBackend extends Backend {
   }
 
   def emitDef(c: Module): String = {
-
-    var res = "//  " + c.moduleName + " " + c.name + "(\"" + c.name + "\");\n"
-
+    var res = ""
 //    val spacing = (if(c.verilog_parameters != "") " " else "");
 //    var res = "  " + c.moduleName + " " + c.verilog_parameters + spacing + c.name + "(";
     if (c.clocks.length > 0) {
@@ -253,7 +250,7 @@ class SysCRtlBackend extends Backend {
     res
   }
 
-  override def emitDef(node: Node): String = {
+  def emitDef2(node: Node, module_name : String, instance_number : Int): String = {
     val res =
     node match {
       case x: Bits if (x.isIo && x.dir == INPUT) =>
@@ -269,18 +266,29 @@ class SysCRtlBackend extends Backend {
             "  assign " + emitTmp(node) + " = " + emitRand(node) + ";\n"
          }
       case x: Bits =>
-            "  void m0() { " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + "; }\n"
-
+         {
+            val p : (Int, Array[Node]) = ( instance_number, Array(node.inputs(0)))
+            methods_and_threads(module_name)._1 += p
+            "  void m" + instance_number + "() { " + emitTmp(node) + " = " + emitRef(node.inputs(0)) + "; }\n"
+         }
       case x: Mux =>
-        "  void m0() { " + emitTmp(x) + " = (" + emitRef(x.inputs(0)) + ") ? " + emitRef(x.inputs(1)) + " : " + emitRef(x.inputs(2)) + "; }\n"
+         {
+            val p : (Int, Array[Node]) = ( instance_number, Array(node.inputs(0),node.inputs(1),node.inputs(2)))
+            methods_and_threads(module_name)._1 += p
+            "  void m" + instance_number + "() { " + emitTmp(x) + " = (" + emitRef(x.inputs(0)) + ") ? " + emitRef(x.inputs(1)) + " : " + emitRef(x.inputs(2)) + "; }\n"
+         }
 
       case o: Op if ( o.op == "##") =>
         "  assign " + emitTmp(o) + " = " +
           "{" + emitRef(node.inputs(0)) + ", " + emitRef(node.inputs(1)) + "}"        + ";\n"
 
       case o: Op if ( node.inputs.length == 1) =>
-          "  void m0() { " + emitTmp(o) + " = " +
-          o.op + " " + emitRef(node.inputs(0)) + "; }\n"
+         {
+            val p : (Int, Array[Node]) = ( instance_number, Array(node.inputs(0)))
+            methods_and_threads(module_name)._1 += p
+
+            "  void m" + instance_number + "() { " + emitTmp(o) + " = " + o.op + " " + emitRef(node.inputs(0)) + "; }\n"
+         }
 
       case o: Op if (o.op == "s*s" || o.op == "s*u" || o.op == "s%s" || o.op == "s/s") =>
         "  assign " + emitTmp(o) + " = " +
@@ -295,9 +303,12 @@ class SysCRtlBackend extends Backend {
           "$signed(" + emitRef(node.inputs(0)) + ") >>> " + emitRef(node.inputs(1))        + ";\n"
 
       case o: Op =>
-        "  void m0() { " + emitTmp(o) + " = " +
-          emitRef(node.inputs(0)) + " " + o.op + " " + emitRef(node.inputs(1))        + "; }\n"
+         {
+            val p : (Int, Array[Node]) = ( instance_number, Array(node.inputs(0),node.inputs(1)))
+            methods_and_threads(module_name)._1 += p
 
+            "  void m" + instance_number + "() { " + emitTmp(o) + " = " + emitRef(node.inputs(0)) + " " + o.op + " " + emitRef(node.inputs(1))        + "; }\n"
+         }
 
       case x: Extract =>
         node.inputs.tail.foreach(x.validateIndex)
@@ -762,13 +773,16 @@ class SysCRtlBackend extends Backend {
     val resSimulate = new StringBuilder()
     val resSynthesis = new StringBuilder()
     val res = new StringBuilder()
-    for (m <- c.nodes) {
+    for ((m,instance_number) <- c.nodes.zipWithIndex) {
       val resNode = if (synthesizeable(m)) {
         resSynthesis
       } else {
         resSimulate
       }
-      resNode.append(emitDef(m))
+
+      val moduleName = if (c.moduleName != "") c.moduleName else extractClassName(c)
+
+      resNode.append(emitDef2(m, moduleName, instance_number))
     }
     // Did we generate any non-synthesizable definitions?
     if (resSimulate.length > 0) {
@@ -777,9 +791,6 @@ class SysCRtlBackend extends Backend {
       res.append(endif_not_synthesis)
     }
     res ++= resSynthesis
-    for (c <- c.children) {
-      res.append(emitDef(c))
-    }
     res
   }
 
@@ -804,19 +815,23 @@ class SysCRtlBackend extends Backend {
       if (p.clock != null && clkDomain != null)
         clkDomain.append(emitPrintf(p))
     }
-    for (clock <- c.clocks) {
+
+    val moduleName = if (c.moduleName != "") c.moduleName else extractClassName(c)
+
+    for ((clock,instance_number) <- c.clocks.zipWithIndex) {
       val dom = clkDomains(clock)
       if (!dom.isEmpty) {
 //        if (res.isEmpty)
 //          res.append("\n")
-        res.append("  void t0() {\n")
+        methods_and_threads(moduleName)._2 += instance_number
+        res.append("  void t" + instance_number + "() {\n")
 	res.append("     wait(1);\n")
         res.append("     while(1) {\n")
 //	always @(posedge " + emitRef(clock) + ") begin\n")
         res.append(dom.result())
         res.append("        wait(1);\n")
-        res.append("     };\n")
-        res.append("  end\n")
+        res.append("     }\n")
+        res.append("  }\n")
       }
     }
     res
@@ -875,7 +890,7 @@ class SysCRtlBackend extends Backend {
     c.nodes.map(emitInit(_)).addString(sb)
 
     val res = new StringBuilder
-    if (!sb.isEmpty) {
+    if ( false && !sb.isEmpty) {
       res append if_not_synthesis
       res append "  integer initvar;\n"
       res append "  initial begin\n"
@@ -888,13 +903,17 @@ class SysCRtlBackend extends Backend {
   }
 
   def emitModuleText(c: Module): String = {
+    val moduleName = if (c.moduleName != "") c.moduleName else extractClassName(c)
+
+    methods_and_threads += (moduleName -> ( ArrayBuffer[(Int,Array[Node])](),ArrayBuffer[Int]()))
+
     if (c.isInstanceOf[BlackBox])
       return ""
 
     val res = new StringBuilder()
     var first = true;
     var nl = "";
-    res.append("//SMB before clocks and resets\n")
+
     if (c.clocks.length > 0 || c.resets.size > 0)
     res.append(c.clocks.map(x => emitRef(x)).foldLeft("")(_ + "  sc_in_clk " + _ + ";\n"))
     res.append(c.resets.values.toList.map(x => emitRef(x)).foldLeft("")(_ + "  sc_in<bool> " + _ + ";\n"))
@@ -917,39 +936,66 @@ class SysCRtlBackend extends Backend {
 //    val uncommentedPorts = ports.filter(!_.result.contains("//"))
 //    uncommentedPorts.slice(0, uncommentedPorts.length-1).map(_.append(","))
 
-    res.append("//SMB before ports\n")
     res.append(ports.map(_.result).reduceLeft(_ + "\n" + _))
-    res.append("\n\n");
-    res.append("//SMB before emitDecs\n")
+    res.append("\n");
+
     res.append(emitDecs(c));
-    res.append("\n");
-    res.append("//SMB before emitInits\n")
+
     res.append(emitInits(c));
-    res.append("\n");
-    res.append("//SMB before emitDefs\n")
+
     res.append(emitDefs(c));
-    res.append("//SMB before emitRegs\n")
+
     res.append(emitRegs(c))
 
-    res.append("//SMB before emitConstructor\n")
     res.append(emitConstructor(c));
 
-    res.append("}\n\n");
+    res.append("};\n");
     res.result();
   }
 
   def emitConstructor(c: Module): String = {
+    val moduleName = if (c.moduleName != "") c.moduleName else extractClassName(c)
+
+    val methods = methods_and_threads(moduleName)._1
+    val threads = methods_and_threads(moduleName)._2
+
     val res = new StringBuilder()
-    res.append("  SC_CTOR(" + c.moduleName + ") {\n")
+
+
+
+    for (c <- c.children) {
+       res.append( "  " + c.moduleName + " " + c.name + ";\n")
+    }
+
+    res.append("  SC_CTOR(" + moduleName + ")")
+
+    val instance_names = for (c <- c.children) yield c.name
+    if (!instance_names.isEmpty) {
+       res.append( " :" + instance_names.map( i => " " + i + "(\"" + i + "\")").mkString(","))
+    }
+
+    res.append(" {\n")
+
+    def isLiteral( x : Node) : Boolean = {
+       x match {
+          case _ : Literal => true
+          case _ => false
+       }
+    }
+
     for (m<-methods) {
-       res.append("    SC_METHOD(" + m._1 + ");\n")        
-       res.append("    sensitive << x;\n")        
+       res.append("    SC_METHOD( m" + m._1 + ");\n")        
+       val lst = m._2.filter( x => !isLiteral(x))
+       if ( !lst.isEmpty) res.append("    sensitive" + lst.foldLeft("")( _ + " << " + emitRef(_)) + ";\n")
     }
     for (t<-threads) {
-       res.append("    SC_THREAD(" + t + ");\n")        
+       res.append("    SC_THREAD( t" + t + ");\n")        
        res.append("    sensitive << clk.pos();\n")        
     }
-    res.append("  }\n\n")
+    for (c <- c.children) {
+      res.append(emitDef(c))
+    }
+    res.append("  }\n")
     res.result()
   }
 
@@ -989,7 +1035,6 @@ class SysCRtlBackend extends Backend {
     if (top.isInstanceOf[BlackBox])
       return
 
-    print( "CHILDREN:"); println( top.children)
     for (child <- top.children) {
       emitChildren(child, defs, out, depth + 1);
     }
@@ -997,10 +1042,7 @@ class SysCRtlBackend extends Backend {
     for( (text, comps) <- defs(className)) {
       if( comps contains top ) {
         if( !(flushedTexts contains text) ) {
-          out.append("SC_MODULE(" + top.moduleName + ") {")
-          print( "TEXT: ")
-          println( comps)
-          println( text)
+          out.append("SC_MODULE(" + top.moduleName + ") {\n")
           out.append(text);
           flushedTexts += text
         }
@@ -1048,6 +1090,7 @@ class SysCRtlBackend extends Backend {
       }
     }
     flushModules(out, defs, level);
+    out.append( "#include \"systemc.h\"\n")
     emitChildren(top, defs, out, depth);
   }
 
